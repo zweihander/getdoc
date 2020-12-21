@@ -28,7 +28,8 @@ func docDescription(doc *goquery.Document) []string {
 	doc.Find("#dev_page_content").Each(func(i int, s *goquery.Selection) {
 		s.Children().EachWithBreak(func(i int, selection *goquery.Selection) bool {
 			if selection.Is("p") && selection.Text() != "" {
-				// Trimming space and handling newlines.
+				hrefs := modifyHrefs(selection)
+
 				text := strings.TrimSpace(selection.Text())
 				for _, part := range strings.Split(text, "\n") {
 					part = strings.TrimSpace(part)
@@ -36,6 +37,10 @@ func docDescription(doc *goquery.Document) []string {
 						continue
 					}
 					description = append(description, part)
+				}
+
+				if len(hrefs) > 0 {
+					description = append(description, "\n"+createLinks(hrefs))
 				}
 			}
 			return !selection.HasClass("clearfix")
@@ -78,7 +83,14 @@ func docParams(doc *goquery.Document) map[string]string {
 		Each(func(i int, row *goquery.Selection) {
 			var rowContents []string
 			row.Find("td").Each(func(i int, column *goquery.Selection) {
-				rowContents = append(rowContents, strings.TrimSpace(column.Text()))
+				hrefs := modifyHrefs(column)
+				text := column.Text()
+
+				if len(hrefs) > 0 {
+					text += "\n\n" + createLinks(hrefs)
+				}
+
+				rowContents = append(rowContents, text)
 			})
 			if len(rowContents) == 3 {
 				fields[rowContents[0]] = rowContents[2]
