@@ -18,15 +18,9 @@ func (u unusableHTTPClient) Do(req *http.Request) (*http.Response, error) {
 }
 
 func TestExtract(t *testing.T) {
-	fs, err := dl.NewZipFS(filepath.Join("dl", "_testdata", "121.zip"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	c, err := dl.NewClient(dl.Options{
-		Path:     "zip",
 		Client:   unusableHTTPClient{},
-		FS:       fs,
+		Path:     filepath.Join("dl", "_testdata", "121.db"),
 		Readonly: true,
 	})
 	if err != nil {

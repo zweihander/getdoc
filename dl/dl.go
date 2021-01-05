@@ -7,26 +7,27 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 
+	"errors"
+
 	"github.com/cenkalti/backoff/v4"
-	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
+	"go.etcd.io/bbolt"
 	"go.uber.org/ratelimit"
 )
 
 type Client struct {
 	rate     ratelimit.Limiter
 	http     HTTPClient
-	db       *pebble.DB
+	db       *bbolt.DB
 	readonly bool
 }
 
 type Options struct {
-	Path     string
-	FS       vfs.FS
 	Client   HTTPClient
+	Path     string
 	Readonly bool
 }
 
@@ -35,16 +36,38 @@ type HTTPClient interface {
 }
 
 func NewClient(opt Options) (*Client, error) {
-	db, err := pebble.Open(opt.Path, &pebble.Options{
-		FS:               opt.FS,
-		ReadOnly:         opt.Readonly,
-		ErrorIfNotExists: opt.Readonly,
-	})
+	if opt.Client == nil {
+		opt.Client = http.DefaultClient
+	}
+
+	if err := os.MkdirAll(filepath.Dir(opt.Path), 0600); err != nil {
+		return nil, err
+	}
+
+	db, err := bbolt.Open(opt.Path, 0600, &bbolt.Options{ReadOnly: opt.Readonly})
 	if err != nil {
 		return nil, err
 	}
-	if opt.Client == nil {
-		opt.Client = http.DefaultClient
+
+	if opt.Readonly {
+		// Ensure that we have cache bucket.
+		if err := db.View(func(tx *bbolt.Tx) error {
+			if tx.Bucket([]byte("cache")) == nil {
+				return fmt.Errorf("no cache bucket")
+			}
+
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	} else {
+		// Create the cache bucket.
+		if err := db.Update(func(tx *bbolt.Tx) error {
+			_, err := tx.CreateBucketIfNotExists([]byte("cache"))
+			return err
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	return &Client{
@@ -93,17 +116,17 @@ func (c *Client) download(ctx context.Context, layer int, key string) ([]byte, e
 
 	res, err := c.http.Do(req)
 	if err != nil {
-		return nil, errors.Errorf("failed to do request: %w", err)
+		return nil, fmt.Errorf("failed to do request: %w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, errors.Errorf("unexpected http code %d", res.StatusCode)
+		return nil, fmt.Errorf("unexpected http code %d", res.StatusCode)
 	}
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return nil, errors.Errorf("failed to read body: %w", err)
+		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
 
 	return body, nil
@@ -120,23 +143,18 @@ func (c *Client) download(ctx context.Context, layer int, key string) ([]byte, e
 //
 // Blank key is invalid.
 func (c *Client) Get(ctx context.Context, layer int, key string) ([]byte, error) {
-	k := []byte(key)
 	if layer != NoLayer {
-		k = []byte(fmt.Sprintf("%d:%s", layer, k))
+		key = fmt.Sprintf("%d:%s", layer, key)
 	}
 
 	// Trying to get from cache.
-	buf, closer, err := c.db.Get(k)
-	if err == nil {
-		// Copy buf because slice is not valid after close.
-		data := append([]byte(nil), buf...)
-		if err := closer.Close(); err != nil {
-			return nil, errors.Errorf("cache: %w", err)
-		}
-		return data, nil
+	buf, err := c.cacheGet(key)
+	if err != nil {
+		return nil, err
 	}
-	if !errors.Is(err, pebble.ErrNotFound) {
-		return nil, errors.Errorf("cache: %w", err)
+
+	if buf != nil {
+		return buf, nil
 	}
 
 	// Downloading with retry backoff.
@@ -159,13 +177,30 @@ func (c *Client) Get(ctx context.Context, layer int, key string) ([]byte, error)
 		data = out
 		return nil
 	}, backoff.NewExponentialBackOff()); err != nil {
-		return nil, errors.Errorf("failed to fetch: %w", err)
+		return nil, fmt.Errorf("failed to fetch: %w", err)
 	}
 
 	// Adding value to cache.
-	if err := c.db.Set(k, data, &pebble.WriteOptions{}); err != nil {
-		return nil, errors.Errorf("cache: %w", err)
+	if err := c.cacheSet(key, data); err != nil {
+		return nil, fmt.Errorf("cache: %w", err)
 	}
 
 	return data, nil
+}
+
+func (c *Client) cacheGet(key string) (res []byte, err error) {
+	err = c.db.View(func(tx *bbolt.Tx) error {
+		value := tx.Bucket([]byte("cache")).Get([]byte(key))
+		res = make([]byte, len(value))
+		// Copy buf because slice is not valid after tx.
+		copy(res, value)
+		return nil
+	})
+	return
+}
+
+func (c *Client) cacheSet(key string, value []byte) error {
+	return c.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("cache")).Put([]byte(key), value)
+	})
 }

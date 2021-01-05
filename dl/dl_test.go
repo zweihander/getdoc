@@ -14,20 +14,20 @@ func (u unusableHTTPClient) Do(req *http.Request) (*http.Response, error) {
 }
 
 func TestClient_Download(t *testing.T) {
-	fs, err := NewZipFS(filepath.Join("_testdata", "121.zip"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	c, err := NewClient(Options{
-		Path:     "zip",
 		Client:   unusableHTTPClient{},
-		FS:       fs,
+		Path:     filepath.Join("_testdata", "121.db"),
 		Readonly: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	defer func() {
+		if err := c.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
 
 	data, err := c.Get(context.Background(), 0, "schema")
 	if err != nil {
